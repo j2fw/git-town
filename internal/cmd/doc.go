@@ -33,6 +33,7 @@ func Execute() error {
 	rootCmd.AddCommand(prependCommand())
 	rootCmd.AddCommand(proposeCommand())
 	rootCmd.AddCommand(prototypeCmd())
+	rootCmd.AddCommand(prsCmd())
 	rootCmd.AddCommand(renameCommand())
 	rootCmd.AddCommand(repoCommand())
 	rootCmd.AddCommand(runLogCommand())
