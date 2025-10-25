@@ -1,17 +1,21 @@
 package cmd
 
 import (
-	"fmt"
+	"cmp"
 
 	"github.com/git-town/git-town/v22/internal/cli/flags"
-	"github.com/git-town/git-town/v22/internal/cli/print"
 	"github.com/git-town/git-town/v22/internal/cmd/cmdhelpers"
+	"github.com/git-town/git-town/v22/internal/cmd/sync"
 	"github.com/git-town/git-town/v22/internal/config/cliconfig"
 	"github.com/git-town/git-town/v22/internal/config/configdomain"
 	"github.com/git-town/git-town/v22/internal/execute"
-	"github.com/git-town/git-town/v22/internal/forge"
 	"github.com/git-town/git-town/v22/internal/git/gitdomain"
+	"github.com/git-town/git-town/v22/internal/vm/opcodes"
+	"github.com/git-town/git-town/v22/internal/vm/optimizer"
+	"github.com/git-town/git-town/v22/internal/vm/program"
 	"github.com/git-town/git-town/v22/pkg/prelude"
+	. "github.com/git-town/git-town/v22/pkg/prelude"
+	"github.com/git-town/git-town/v22/pkg/set"
 	"github.com/spf13/cobra"
 )
 
@@ -22,6 +26,9 @@ TODO`
 )
 
 func prsCmd() *cobra.Command {
+	// TODO: fix string here
+	addStackFlag, readStackFlag := flags.Stack("propose the entire stack")
+	addDryRunFlag, readDryRunFlag := flags.DryRun()
 	addVerboseFlag, readVerboseFlag := flags.Verbose()
 	cmd := cobra.Command{
 		Use:     "proposals",
@@ -31,31 +38,42 @@ func prsCmd() *cobra.Command {
 		Long:    cmdhelpers.Long(prsDesc, prsHelp),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			verbose, errVerbose := readVerboseFlag(cmd)
-			if err := errVerbose; err != nil {
+			dryRun, errDryRun := readDryRunFlag(cmd)
+			stack, errStack := readStackFlag(cmd)
+			if err := cmp.Or(errVerbose, errDryRun, errStack); err != nil {
 				return err
 			}
 			cliConfig := cliconfig.New(cliconfig.NewArgs{
 				AutoResolve:  prelude.Option[configdomain.AutoResolve]{},
 				AutoSync:     prelude.Option[configdomain.AutoSync]{},
 				Detached:     prelude.Option[configdomain.Detached]{},
-				DryRun:       prelude.Option[configdomain.DryRun]{},
+				DryRun:       dryRun,
 				Order:        prelude.Option[configdomain.Order]{},
 				PushBranches: prelude.Option[configdomain.PushBranches]{},
 				Stash:        prelude.Option[configdomain.Stash]{},
 				Verbose:      verbose,
 			})
-			return executePRs(cliConfig)
+			return executePRs(prsArgs{
+				cliConfig: cliConfig,
+				stack:     stack,
+			})
 		},
 	}
-
+	addStackFlag(&cmd)
+	addDryRunFlag(&cmd)
 	addVerboseFlag(&cmd)
 	return &cmd
 }
 
-func executePRs(cliConfig configdomain.PartialConfig) error {
+type prsArgs struct {
+	cliConfig configdomain.PartialConfig
+	stack     configdomain.FullStack
+}
+
+func executePRs(args prsArgs) error {
 Start:
 	repo, err := execute.OpenRepo(execute.OpenRepoArgs{
-		CliConfig:        cliConfig,
+		CliConfig:        args.cliConfig,
 		PrintBranchNames: true,
 		PrintCommands:    true,
 		ValidateGitRepo:  true,
@@ -64,11 +82,13 @@ Start:
 	if err != nil {
 		return err
 	}
-	// data, flow, err := determineBranchData(repo)
-	// if err != nil {
-	// 	return err
-	// }
-	data, flow, err := determinePRsData(repo)
+	pa := prsArgs{
+		// body:      None[gitdomain.ProposalBody](),
+		// bodyFile:  None[gitdomain.ProposalBodyFile](),
+		cliConfig: args.cliConfig,
+		stack:     args.stack,
+	}
+	data, flow, err := determinePRsData(repo, pa)
 	if err != nil {
 		return err
 	}
@@ -79,80 +99,55 @@ Start:
 	case configdomain.ProgramFlowRestart:
 		goto Start
 	}
-
-	for _, branch := range data.branches {
-		fmt.Println(branch)
-	}
-
+	prsProgram(repo, data)
 	// fmt.Print(branchLayout(entries, data))
 	return nil
 }
 
 type prsData struct {
-	branches gitdomain.LocalBranchNames
+	proposeData
 }
 
-func determinePRsData(repo execute.OpenRepoResult) (data prsData, flow configdomain.ProgramFlow, err error) {
-	repoStatus, err := repo.Git.RepoStatus(repo.Backend)
-	if err != nil {
-		return data, configdomain.ProgramFlowExit, err
+func determinePRsData(repo execute.OpenRepoResult, args prsArgs) (data prsData, flow configdomain.ProgramFlow, err error) {
+	proposeArgs := proposeArgs{
+		// body:      None[gitdomain.ProposalBody](),
+		// bodyFile:  None[gitdomain.ProposalBodyFile](),
+		cliConfig: args.cliConfig,
+		stack:     false,
+		title:     prelude.Option[gitdomain.ProposalTitle]{},
 	}
-
-	config := repo.UnvalidatedConfig.NormalConfig
-	connector, err := forge.NewConnector(forge.NewConnectorArgs{
-		Backend: repo.Backend,
-		// BitbucketAppPassword: config.BitbucketAppPassword,
-		// BitbucketUsername:    config.BitbucketUsername,
-		ForgeType: config.ForgeType,
-		// ForgejoToken:         config.ForgejoToken,
-		Frontend:            repo.Frontend,
-		GitHubConnectorType: config.GitHubConnectorType,
-		GitHubToken:         config.GitHubToken,
-		// GitLabConnectorType:  config.GitLabConnectorType,
-		// GitLabToken:          config.GitLabToken,
-		// GiteaToken:           config.GiteaToken,
-		Log:       print.Logger{},
-		RemoteURL: config.DevURL(repo.Backend),
-	})
-	if err != nil {
-		return data, configdomain.ProgramFlowExit, err
-	}
-
-	branchesSnapshot, _, _, flow, err := execute.LoadRepoSnapshot(execute.LoadRepoSnapshotArgs{
-		Backend:               repo.Backend,
-		CommandsCounter:       repo.CommandsCounter,
-		ConfigSnapshot:        repo.ConfigSnapshot,
-		Connector:             connector,
-		Fetch:                 false,
-		FinalMessages:         repo.FinalMessages,
-		Frontend:              repo.Frontend,
-		Git:                   repo.Git,
-		HandleUnfinishedState: false,
-		// Inputs:                inputs,
-		Repo:                  repo,
-		RepoStatus:            repoStatus,
-		RootDir:               repo.RootDir,
-		UnvalidatedConfig:     repo.UnvalidatedConfig,
-		ValidateNoOpenChanges: false,
-	})
-	if err != nil {
-		return data, configdomain.ProgramFlowExit, err
-	}
-
-	switch flow {
-	case configdomain.ProgramFlowContinue:
-	case configdomain.ProgramFlowExit, configdomain.ProgramFlowRestart:
-		return data, flow, nil
-	}
-
-	branchesAndTypes := repo.UnvalidatedConfig.UnvalidatedBranchesAndTypes(branchesSnapshot.Branches.LocalBranches().NamesLocalBranches())
-	localBranches := branchesSnapshot.Branches.LocalBranches().NamesLocalBranches()
-	perennialBranches := branchesAndTypes.BranchesOfTypes(configdomain.BranchTypePerennialBranch, configdomain.BranchTypeMainBranch)
-
-	branchesToWalk := gitdomain.LocalBranchNames{}
-	branchesToWalk = localBranches.Remove(perennialBranches...)
+	proposeData, flow, err := determineProposeData(repo, proposeArgs)
 
 	return prsData{
-		branches: branchesToWalk,
+		proposeData: proposeData,
 	}, configdomain.ProgramFlowContinue, nil
+}
+
+func prsProgram(repo execute.OpenRepoResult, data prsData) program.Program {
+	prog := NewMutable(&program.Program{})
+	data.config.CleanupLineage(data.branchInfos, data.nonExistingBranches, repo.FinalMessages, repo.Backend, data.config.NormalConfig.Order)
+	branchesToDelete := set.New[gitdomain.LocalBranchName]()
+	sync.BranchesProgram(data.branchesToSync, sync.BranchProgramArgs{
+		BranchInfos:         data.branchInfos,
+		BranchInfosPrevious: data.branchInfosLastRun,
+		BranchesToDelete:    NewMutable(&branchesToDelete),
+		Config:              data.config,
+		InitialBranch:       data.initialBranch,
+		PrefetchBranchInfos: data.preFetchBranchInfos,
+		Remotes:             data.remotes,
+		Program:             prog,
+		Prune:               false,
+		PushBranches:        true,
+	})
+	for _, branchToPropose := range data.branchesToPropose {
+		switch branchToPropose.branchType {
+		case configdomain.BranchTypePrototypeBranch, configdomain.BranchTypeParkedBranch, configdomain.BranchTypeContributionBranch, configdomain.BranchTypeMainBranch, configdomain.BranchTypeObservedBranch, configdomain.BranchTypePerennialBranch:
+			continue
+		}
+		prog.Value.Add(&opcodes.PushCurrentBranchIfLocal{
+			CurrentBranch: branchToPropose.name,
+		})
+
+	}
+	return optimizer.Optimize(prog.Immutable())
 }
