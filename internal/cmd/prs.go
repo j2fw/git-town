@@ -2,14 +2,14 @@ package cmd
 
 import (
 	"fmt"
-	"regexp"
 
-	"github.com/git-town/git-town/v22/internal/cli/dialog"
 	"github.com/git-town/git-town/v22/internal/cli/flags"
+	"github.com/git-town/git-town/v22/internal/cli/print"
 	"github.com/git-town/git-town/v22/internal/cmd/cmdhelpers"
 	"github.com/git-town/git-town/v22/internal/config/cliconfig"
 	"github.com/git-town/git-town/v22/internal/config/configdomain"
 	"github.com/git-town/git-town/v22/internal/execute"
+	"github.com/git-town/git-town/v22/internal/forge"
 	"github.com/git-town/git-town/v22/internal/git/gitdomain"
 	"github.com/git-town/git-town/v22/pkg/prelude"
 	"github.com/spf13/cobra"
@@ -18,7 +18,7 @@ import (
 const (
 	prsDesc = "Display proposals for the branch hierarchy"
 	prsHelp = `
-Git Town's equivalent of the "git branch" command.`
+TODO`
 )
 
 func prsCmd() *cobra.Command {
@@ -64,7 +64,11 @@ Start:
 	if err != nil {
 		return err
 	}
-	data, flow, err := determineBranchData(repo)
+	// data, flow, err := determineBranchData(repo)
+	// if err != nil {
+	// 	return err
+	// }
+	data, flow, err := determinePRsData(repo)
 	if err != nil {
 		return err
 	}
@@ -75,18 +79,80 @@ Start:
 	case configdomain.ProgramFlowRestart:
 		goto Start
 	}
-	entries := dialog.NewSwitchBranchEntries(dialog.NewSwitchBranchEntriesArgs{
-		BranchInfos:       data.branchInfos,
-		BranchTypes:       []configdomain.BranchType{},
-		BranchesAndTypes:  data.branchesAndTypes,
-		ExcludeBranches:   gitdomain.LocalBranchNames{},
-		Lineage:           repo.UnvalidatedConfig.NormalConfig.Lineage,
-		MainBranch:        repo.UnvalidatedConfig.UnvalidatedConfig.MainBranch,
-		Order:             repo.UnvalidatedConfig.NormalConfig.Order,
-		Regexes:           []*regexp.Regexp{},
-		ShowAllBranches:   false,
-		UnknownBranchType: repo.UnvalidatedConfig.NormalConfig.UnknownBranchType,
-	})
-	fmt.Print(branchLayout(entries, data))
+
+	for _, branch := range data.branches {
+		fmt.Println(branch)
+	}
+
+	// fmt.Print(branchLayout(entries, data))
 	return nil
+}
+
+type prsData struct {
+	branches gitdomain.LocalBranchNames
+}
+
+func determinePRsData(repo execute.OpenRepoResult) (data prsData, flow configdomain.ProgramFlow, err error) {
+	repoStatus, err := repo.Git.RepoStatus(repo.Backend)
+	if err != nil {
+		return data, configdomain.ProgramFlowExit, err
+	}
+
+	config := repo.UnvalidatedConfig.NormalConfig
+	connector, err := forge.NewConnector(forge.NewConnectorArgs{
+		Backend: repo.Backend,
+		// BitbucketAppPassword: config.BitbucketAppPassword,
+		// BitbucketUsername:    config.BitbucketUsername,
+		ForgeType: config.ForgeType,
+		// ForgejoToken:         config.ForgejoToken,
+		Frontend:            repo.Frontend,
+		GitHubConnectorType: config.GitHubConnectorType,
+		GitHubToken:         config.GitHubToken,
+		// GitLabConnectorType:  config.GitLabConnectorType,
+		// GitLabToken:          config.GitLabToken,
+		// GiteaToken:           config.GiteaToken,
+		Log:       print.Logger{},
+		RemoteURL: config.DevURL(repo.Backend),
+	})
+	if err != nil {
+		return data, configdomain.ProgramFlowExit, err
+	}
+
+	branchesSnapshot, _, _, flow, err := execute.LoadRepoSnapshot(execute.LoadRepoSnapshotArgs{
+		Backend:               repo.Backend,
+		CommandsCounter:       repo.CommandsCounter,
+		ConfigSnapshot:        repo.ConfigSnapshot,
+		Connector:             connector,
+		Fetch:                 false,
+		FinalMessages:         repo.FinalMessages,
+		Frontend:              repo.Frontend,
+		Git:                   repo.Git,
+		HandleUnfinishedState: false,
+		// Inputs:                inputs,
+		Repo:                  repo,
+		RepoStatus:            repoStatus,
+		RootDir:               repo.RootDir,
+		UnvalidatedConfig:     repo.UnvalidatedConfig,
+		ValidateNoOpenChanges: false,
+	})
+	if err != nil {
+		return data, configdomain.ProgramFlowExit, err
+	}
+
+	switch flow {
+	case configdomain.ProgramFlowContinue:
+	case configdomain.ProgramFlowExit, configdomain.ProgramFlowRestart:
+		return data, flow, nil
+	}
+
+	branchesAndTypes := repo.UnvalidatedConfig.UnvalidatedBranchesAndTypes(branchesSnapshot.Branches.LocalBranches().NamesLocalBranches())
+	localBranches := branchesSnapshot.Branches.LocalBranches().NamesLocalBranches()
+	perennialBranches := branchesAndTypes.BranchesOfTypes(configdomain.BranchTypePerennialBranch, configdomain.BranchTypeMainBranch)
+
+	branchesToWalk := gitdomain.LocalBranchNames{}
+	branchesToWalk = localBranches.Remove(perennialBranches...)
+
+	return prsData{
+		branches: branchesToWalk,
+	}, configdomain.ProgramFlowContinue, nil
 }
