@@ -464,7 +464,7 @@ func appendProgram(frontend subshelldomain.Runner, data appendFeatureData, final
 			&opcodes.ProposalCreate{
 				Branch:        data.targetBranch,
 				MainBranch:    data.config.ValidatedConfigData.MainBranch,
-				ProposalBody:  None[gitdomain.ProposalBody](),
+				ProposalBody:  Some[gitdomain.ProposalBody]("hi"),
 				ProposalTitle: title,
 			},
 		)

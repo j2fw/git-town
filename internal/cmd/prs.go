@@ -2,6 +2,7 @@ package cmd
 
 import (
 	"cmp"
+	"fmt"
 
 	"github.com/git-town/git-town/v22/internal/cli/flags"
 	"github.com/git-town/git-town/v22/internal/cmd/cmdhelpers"
@@ -10,6 +11,8 @@ import (
 	"github.com/git-town/git-town/v22/internal/config/configdomain"
 	"github.com/git-town/git-town/v22/internal/execute"
 	"github.com/git-town/git-town/v22/internal/git/gitdomain"
+	"github.com/git-town/git-town/v22/internal/state/runstate"
+	"github.com/git-town/git-town/v22/internal/vm/interpreter/fullinterpreter"
 	"github.com/git-town/git-town/v22/internal/vm/opcodes"
 	"github.com/git-town/git-town/v22/internal/vm/optimizer"
 	"github.com/git-town/git-town/v22/internal/vm/program"
@@ -99,9 +102,39 @@ Start:
 	case configdomain.ProgramFlowRestart:
 		goto Start
 	}
-	prsProgram(repo, data)
-	// fmt.Print(branchLayout(entries, data))
-	return nil
+	runProgram := prsProgram(repo, data)
+	runState := runstate.RunState{
+		BeginBranchesSnapshot: data.branchesSnapshot,
+		BeginConfigSnapshot:   repo.ConfigSnapshot,
+		BeginStashSize:        data.stashSize,
+		BranchInfosLastRun:    data.branchInfosLastRun,
+		Command:               proposeCmd,
+		DryRun:                data.config.NormalConfig.DryRun,
+		EndBranchesSnapshot:   None[gitdomain.BranchesSnapshot](),
+		EndConfigSnapshot:     None[configdomain.EndConfigSnapshot](),
+		EndStashSize:          None[gitdomain.StashSize](),
+		RunProgram:            runProgram,
+		TouchedBranches:       runProgram.TouchedBranches(),
+		UndoAPIProgram:        program.Program{},
+	}
+	return fullinterpreter.Execute(fullinterpreter.ExecuteArgs{
+		Backend:                 repo.Backend,
+		CommandsCounter:         repo.CommandsCounter,
+		Config:                  data.config,
+		Connector:               data.connector,
+		FinalMessages:           repo.FinalMessages,
+		Frontend:                repo.Frontend,
+		Git:                     repo.Git,
+		HasOpenChanges:          data.hasOpenChanges,
+		InitialBranch:           data.initialBranch,
+		InitialBranchesSnapshot: data.branchesSnapshot,
+		InitialConfigSnapshot:   repo.ConfigSnapshot,
+		InitialStashSize:        data.stashSize,
+		Inputs:                  data.inputs,
+		PendingCommand:          None[string](),
+		RootDir:                 repo.RootDir,
+		RunState:                runState,
+	})
 }
 
 type prsData struct {
@@ -148,6 +181,22 @@ func prsProgram(repo execute.OpenRepoResult, data prsData) program.Program {
 			CurrentBranch: branchToPropose.name,
 		})
 
+		if existingProposalURL, hasExistingProposal := branchToPropose.existingProposalURL.Get(); hasExistingProposal {
+			fmt.Println("HAS", branchToPropose)
+			prog.Value.Add(
+				&opcodes.BrowserOpen{
+					URL: existingProposalURL,
+				},
+			)
+		} else {
+			fmt.Println("ELSE", branchToPropose)
+			prog.Value.Add(&opcodes.ProposalCreate{
+				Branch:        branchToPropose.name,
+				MainBranch:    data.config.ValidatedConfigData.MainBranch,
+				ProposalBody:  data.proposalBody,
+				ProposalTitle: data.proposalTitle,
+			})
+		}
 	}
 	return optimizer.Optimize(prog.Immutable())
 }
